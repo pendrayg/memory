@@ -2,7 +2,7 @@ import { defineConfig } from 'tsup';
 import pkg from './package.json' with { type: 'json' };
 
 export default defineConfig({
-  entry: ['src/server.ts', 'src/hook.ts', 'src/migrate.ts'],
+  entry: ['src/boot.ts', 'src/server.ts', 'src/hook.ts', 'src/migrate.ts'],
   format: ['esm'],
   target: 'node22',
   platform: 'node',
