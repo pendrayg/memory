@@ -1,6 +1,6 @@
 {
   "name": "memory",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Persistent memory for Claude Code: raw capture via hooks (SessionStart/UserPromptSubmit/PostToolUse/Stop/SessionEnd), hybrid BM25 + semantic search (sqlite-vec + local transformers.js embeddings) via MCP. Embedded local SQLite storage — zero server, zero daemon, zero cloud.",
   "author": {
     "name": "yoannyviquel"

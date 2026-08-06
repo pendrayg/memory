@@ -24,6 +24,13 @@ export interface MemoryConfig {
    * after an update that re-processes the whole history. See {@link throttlePause}.
    */
   loadPercent: number;
+  /**
+   * Idle-gap ceiling (ms) for the per-session production-time accounting. Between two activity events
+   * (prompt / tool use / turn), a gap shorter than this counts as active work; a longer gap is treated
+   * as a walk-away (lunch, meeting) and dropped. Calibration knob — human think/read time varies.
+   * Default 5 min; floored at 1 min. See markActivity in hook.ts.
+   */
+  productionIdleGapMs: number;
 }
 
 export interface AutoRecallConfig {
@@ -186,11 +193,17 @@ export function loadConfig(): MemoryConfig {
   const dtypeOverride = src.get('MEMORY_EMBED_DTYPE', 'embedDtype');
   const onGpu = device !== '' && device !== 'cpu';
   const dtype = (dtypeOverride || (onGpu ? 'fp32' : 'q8')).toLowerCase();
-  // ONNX thread cap scales with the tier (CPU only; ignored by GPU EPs). light=33%, medium=66%,
-  // heavy=100% of the cores. Floor of 1 so single/dual-core hosts still run.
-  // Single source of truth: the tier (no separate override knob).
+  // Background-work load cap (duty-cycle). Clamp to [5, 100]: never fully starves the loops (would
+  // mean the backfill never finishes), 100 = no throttle. See throttlePause / the background loops.
+  const loadPercent = Math.max(5, Math.min(100, src.num('MEMORY_LOAD_PERCENT', 'loadPercent', 100)));
+
+  // ONNX thread cap (CPU only; ignored by GPU EPs). Base is per-tier (light=33%, medium=66%,
+  // heavy=100% of the cores), but loadPercent also caps it: at load<100 a batch runs on fewer cores
+  // so the *instantaneous* CPU peak stays ~loadPercent — not just the duty-cycle average. This
+  // couples peak and average to one knob → catch-up is slower, but the machine never spikes.
+  // Floor of 1 so single/dual-core hosts still run.
   const threadFraction: Record<string, number> = { light: 1 / 3, medium: 2 / 3, heavy: 1 };
-  const fraction = threadFraction[tier] ?? 0.25;
+  const fraction = Math.min(threadFraction[tier] ?? 0.25, loadPercent / 100);
   const threads = Math.max(1, Math.floor(os.cpus().length * fraction));
 
   // LLM session digests (claude -p). On by default; opt out via env/file. Haiku by default so the
@@ -214,9 +227,11 @@ export function loadConfig(): MemoryConfig {
   // Bounded multiplier ±weight (see satisfactionFactor). Tie-breaker by default; 0 disables it.
   const satisfactionWeight = src.num('MEMORY_SATISFACTION_WEIGHT', 'satisfactionWeight', 0.12);
 
-  // Background-work load cap (duty-cycle). Clamp to [5, 100]: never fully starves the loops (would
-  // mean the backfill never finishes), 100 = no throttle. See throttlePause / the background loops.
-  const loadPercent = Math.max(5, Math.min(100, src.num('MEMORY_LOAD_PERCENT', 'loadPercent', 100)));
+  // Production-time idle-gap ceiling. Floored at 1 min so a too-small value can't zero out the metric.
+  const productionIdleGapMs = Math.max(
+    60_000,
+    src.num('MEMORY_PRODUCTION_IDLE_GAP_MS', 'productionIdleGapMs', 300_000),
+  );
 
   return {
     dbPath,
@@ -228,5 +243,6 @@ export function loadConfig(): MemoryConfig {
     autoRecall: { enabled: autoRecallEnabled, limit: autoRecallLimit },
     satisfactionWeight,
     loadPercent,
+    productionIdleGapMs,
   };
 }

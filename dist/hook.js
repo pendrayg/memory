@@ -84,8 +84,9 @@ function loadConfig() {
   const dtypeOverride = src.get("MEMORY_EMBED_DTYPE", "embedDtype");
   const onGpu = device !== "" && device !== "cpu";
   const dtype = (dtypeOverride || (onGpu ? "fp32" : "q8")).toLowerCase();
+  const loadPercent = Math.max(5, Math.min(100, src.num("MEMORY_LOAD_PERCENT", "loadPercent", 100)));
   const threadFraction = { light: 1 / 3, medium: 2 / 3, heavy: 1 };
-  const fraction = threadFraction[tier] ?? 0.25;
+  const fraction = Math.min(threadFraction[tier] ?? 0.25, loadPercent / 100);
   const threads = Math.max(1, Math.floor(os.cpus().length * fraction));
   const digestEnabled = src.flag("MEMORY_DIGEST_ENABLED", "digestEnabled");
   const digestModel = src.get("MEMORY_DIGEST_MODEL", "digestModel") || DEFAULT_DIGEST_MODEL;
@@ -94,7 +95,10 @@ function loadConfig() {
   const autoRecallEnabled = src.flag("MEMORY_AUTO_RECALL", "autoRecall");
   const autoRecallLimit = src.num("MEMORY_AUTO_RECALL_LIMIT", "autoRecallLimit", 3);
   const satisfactionWeight = src.num("MEMORY_SATISFACTION_WEIGHT", "satisfactionWeight", 0.12);
-  const loadPercent = Math.max(5, Math.min(100, src.num("MEMORY_LOAD_PERCENT", "loadPercent", 100)));
+  const productionIdleGapMs = Math.max(
+    6e4,
+    src.num("MEMORY_PRODUCTION_IDLE_GAP_MS", "productionIdleGapMs", 3e5)
+  );
   return {
     dbPath,
     dataDir,
@@ -104,7 +108,8 @@ function loadConfig() {
     rerank: { enabled: rerankEnabled, model: rerankModel },
     autoRecall: { enabled: autoRecallEnabled, limit: autoRecallLimit },
     satisfactionWeight,
-    loadPercent
+    loadPercent,
+    productionIdleGapMs
   };
 }
 
