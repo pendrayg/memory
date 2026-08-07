@@ -11,9 +11,9 @@ may use — a duty-cycle cap, in percent. It paces the loops so they keep the in
 
 | Value | Effect |
 |---|---|
-| `100` (default) | No throttle — drain at full speed (finishes the backlog fastest). |
+| `100` | No throttle — drain at full speed (finishes the backlog fastest). |
 | `50` | Background work idles ~half the time → ~half the average CPU/GPU. |
-| `30` | A good "quiet" setting while you work — noticeably lighter, backfill still progresses. |
+| `30` (default) | A good "quiet" setting while you work — noticeably lighter, backfill still progresses. Also caps the CPU peak (fewer ONNX threads), not just the average. |
 | `5` (min) | Barely-there; the backfill can take a long time. |
 
 > Why would memory be busy at all? Right after a plugin update that **improves how memories are

@@ -194,8 +194,10 @@ export function loadConfig(): MemoryConfig {
   const onGpu = device !== '' && device !== 'cpu';
   const dtype = (dtypeOverride || (onGpu ? 'fp32' : 'q8')).toLowerCase();
   // Background-work load cap (duty-cycle). Clamp to [5, 100]: never fully starves the loops (would
-  // mean the backfill never finishes), 100 = no throttle. See throttlePause / the background loops.
-  const loadPercent = Math.max(5, Math.min(100, src.num('MEMORY_LOAD_PERCENT', 'loadPercent', 100)));
+  // mean the backfill never finishes), 100 = no throttle. Default 30 (all tiers): keeps the machine
+  // quiet out of the box — since loadPercent also caps the thread count (below), the CPU peak stays
+  // ~30% too, not just the average. Raise via MEMORY_LOAD_PERCENT / loadPercent to catch up faster.
+  const loadPercent = Math.max(5, Math.min(100, src.num('MEMORY_LOAD_PERCENT', 'loadPercent', 30)));
 
   // ONNX thread cap (CPU only; ignored by GPU EPs). Base is per-tier (light=33%, medium=66%,
   // heavy=100% of the cores), but loadPercent also caps it: at load<100 a batch runs on fewer cores

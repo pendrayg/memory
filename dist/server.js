@@ -84,7 +84,7 @@ function loadConfig() {
   const dtypeOverride = src.get("MEMORY_EMBED_DTYPE", "embedDtype");
   const onGpu = device !== "" && device !== "cpu";
   const dtype = (dtypeOverride || (onGpu ? "fp32" : "q8")).toLowerCase();
-  const loadPercent = Math.max(5, Math.min(100, src.num("MEMORY_LOAD_PERCENT", "loadPercent", 100)));
+  const loadPercent = Math.max(5, Math.min(100, src.num("MEMORY_LOAD_PERCENT", "loadPercent", 30)));
   const threadFraction = { light: 1 / 3, medium: 2 / 3, heavy: 1 };
   const fraction = Math.min(threadFraction[tier] ?? 0.25, loadPercent / 100);
   const threads = Math.max(1, Math.floor(os.cpus().length * fraction));
@@ -2348,7 +2348,7 @@ var allTools = [
 ];
 
 // src/memory-server.ts
-var PKG_VERSION = true ? "0.13.1" : "0.0.0-dev";
+var PKG_VERSION = true ? "0.13.2" : "0.0.0-dev";
 var MemoryServer = class {
   constructor(config, store) {
     this.config = config;
