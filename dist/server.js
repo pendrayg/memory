@@ -986,6 +986,29 @@ var ModelHost = class {
   deviceUsed() {
     return this.effectiveDevice;
   }
+  /**
+   * Frees the loaded model and resets to the unloaded state. Called when this process stops being the
+   * leader: an ex-leader would otherwise pin its ONNX session (~2 GB for e5-large) for the lifetime of
+   * the process, so with leadership flapping across sessions RAM piles up (observed: several GB).
+   *
+   * transformers.js pipelines/models expose `dispose()` which releases the underlying ONNX session;
+   * we call it best-effort (it may be absent on some model kinds/versions). Resetting the load-state
+   * fields lets a later `load()` transparently re-load if this process becomes leader again.
+   */
+  dispose() {
+    try {
+      this.model?.dispose?.();
+    } catch {
+    }
+    this.model = null;
+    this.loading = null;
+    this.failed = false;
+    this.effectiveDevice = "";
+    try {
+      log(this.dataDir, `[${this.tag}] model disposed`);
+    } catch {
+    }
+  }
   /** Loads the model once (shared promise) and returns it, or null if unavailable. */
   async load() {
     if (this.model) return this.model;
@@ -1203,11 +1226,17 @@ var RerankerHost = class extends ModelHost {
 };
 
 // src/leader.ts
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, unlinkSync } from "fs";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, unlinkSync, openSync, closeSync, renameSync as renameSync2 } from "fs";
 import path4 from "path";
 var STALE_MS = 9e4;
+var READ_RETRIES = 3;
+var READ_RETRY_MS = 10;
+var amHolder = false;
 function lockPath(dataDir) {
   return path4.join(dataDir, "worker.lock");
+}
+function tempPath(dataDir) {
+  return path4.join(dataDir, `worker.lock.${process.pid}.tmp`);
 }
 function pidAlive(pid) {
   try {
@@ -1216,6 +1245,25 @@ function pidAlive(pid) {
   } catch (e) {
     return e?.code === "EPERM";
   }
+}
+function busySleep(ms) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+  }
+}
+function readLockStrict(dataDir) {
+  const file = lockPath(dataDir);
+  for (let attempt = 0; attempt < READ_RETRIES; attempt++) {
+    try {
+      const raw = readFileSync3(file, "utf8");
+      const info = JSON.parse(raw);
+      return { kind: "present", info };
+    } catch (e) {
+      if (e?.code === "ENOENT") return { kind: "absent" };
+      if (attempt < READ_RETRIES - 1) busySleep(READ_RETRY_MS);
+    }
+  }
+  return { kind: "transient" };
 }
 function readLock(dataDir) {
   try {
@@ -1231,21 +1279,73 @@ function releaseLeadership(dataDir) {
   } catch {
   }
 }
+function removeStaleLock(file) {
+  try {
+    unlinkSync(file);
+  } catch (e) {
+    if (e?.code !== "ENOENT") throw e;
+  }
+}
+function tryCreateExclusive(file, content) {
+  let fd;
+  try {
+    fd = openSync(file, "wx");
+    writeFileSync2(fd, content);
+    return true;
+  } catch (e) {
+    if (e?.code === "EEXIST") return false;
+    return false;
+  } finally {
+    if (fd !== void 0) {
+      try {
+        closeSync(fd);
+      } catch {
+      }
+    }
+  }
+}
+function atomicRenew(dataDir, file, content) {
+  const tmp = tempPath(dataDir);
+  try {
+    writeFileSync2(tmp, content);
+    renameSync2(tmp, file);
+    return true;
+  } catch {
+    try {
+      unlinkSync(tmp);
+    } catch {
+    }
+    return false;
+  }
+}
 function refreshLeadership(dataDir, extra) {
   const file = lockPath(dataDir);
   const now = Date.now();
-  const cur = readLock(dataDir);
-  if (cur && cur.pid !== process.pid) {
-    const fresh = typeof cur.ts === "number" && now - cur.ts < STALE_MS;
-    if (fresh && typeof cur.pid === "number" && pidAlive(cur.pid)) return false;
-  }
   try {
     mkdirSync3(path4.dirname(file), { recursive: true });
-    writeFileSync2(file, JSON.stringify({ pid: process.pid, ts: now, ...extra ?? {} }));
-    return true;
   } catch {
-    return false;
   }
+  const content = JSON.stringify({ pid: process.pid, ts: now, ...extra ?? {} });
+  const read = readLockStrict(dataDir);
+  if (read.kind === "absent") {
+    return amHolder = tryCreateExclusive(file, content);
+  }
+  if (read.kind === "transient") {
+    return amHolder;
+  }
+  const cur = read.info;
+  if (cur.pid === process.pid) {
+    return amHolder = atomicRenew(dataDir, file, content);
+  }
+  const fresh = typeof cur.ts === "number" && now - cur.ts < STALE_MS;
+  const alive = typeof cur.pid === "number" && pidAlive(cur.pid);
+  if (fresh && alive) return amHolder = false;
+  try {
+    removeStaleLock(file);
+  } catch {
+    return amHolder = false;
+  }
+  return amHolder = tryCreateExclusive(file, content);
 }
 
 // src/embed-service.ts
@@ -1422,7 +1522,8 @@ var LeaderCoordinator = class extends EventEmitter {
       this.watcher = watch(this.dataDir, (_event, filename) => {
         if (!this.leader && filename && String(filename).includes("worker.lock")) {
           clearTimeout(this.watchT);
-          this.watchT = setTimeout(() => this.sync(), 200);
+          const delay = 200 + Math.floor(Math.random() * 300);
+          this.watchT = setTimeout(() => this.sync(), delay);
         }
       });
       this.watcher.unref?.();
@@ -2348,7 +2449,7 @@ var allTools = [
 ];
 
 // src/memory-server.ts
-var PKG_VERSION = true ? "0.13.2" : "0.0.0-dev";
+var PKG_VERSION = true ? "0.13.3" : "0.0.0-dev";
 var MemoryServer = class {
   constructor(config, store) {
     this.config = config;
@@ -2476,6 +2577,8 @@ var MemoryServer = class {
     this.executor = this.remote;
     this.backfill.stop();
     this.digest.stop();
+    this.embedder.dispose();
+    this.reranker.dispose();
   }
   logStartupDiagnostics() {
     const { dataDir, dbPath, embed } = this.config;

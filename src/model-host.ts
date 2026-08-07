@@ -45,6 +45,32 @@ export abstract class ModelHost<TModel> {
     return this.effectiveDevice;
   }
 
+  /**
+   * Frees the loaded model and resets to the unloaded state. Called when this process stops being the
+   * leader: an ex-leader would otherwise pin its ONNX session (~2 GB for e5-large) for the lifetime of
+   * the process, so with leadership flapping across sessions RAM piles up (observed: several GB).
+   *
+   * transformers.js pipelines/models expose `dispose()` which releases the underlying ONNX session;
+   * we call it best-effort (it may be absent on some model kinds/versions). Resetting the load-state
+   * fields lets a later `load()` transparently re-load if this process becomes leader again.
+   */
+  dispose(): void {
+    try {
+      (this.model as any)?.dispose?.();
+    } catch {
+      /* best-effort: never let teardown throw */
+    }
+    this.model = null;
+    this.loading = null;
+    this.failed = false;
+    this.effectiveDevice = '';
+    try {
+      log(this.dataDir, `[${this.tag}] model disposed`);
+    } catch {
+      /* best-effort logging */
+    }
+  }
+
   /** Loads the model once (shared promise) and returns it, or null if unavailable. */
   protected async load(): Promise<TModel | null> {
     if (this.model) return this.model;

@@ -1097,7 +1097,7 @@ function uniq(arr) {
 }
 
 // src/leader.ts
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, unlinkSync } from "fs";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, unlinkSync, openSync, closeSync, renameSync } from "fs";
 import path5 from "path";
 function lockPath(dataDir) {
   return path5.join(dataDir, "worker.lock");

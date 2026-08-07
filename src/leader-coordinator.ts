@@ -63,7 +63,12 @@ export class LeaderCoordinator extends EventEmitter {
       this.watcher = watch(this.dataDir, (_event, filename) => {
         if (!this.leader && filename && String(filename).includes('worker.lock')) {
           clearTimeout(this.watchT);
-          this.watchT = setTimeout(() => this.sync(), 200);
+          // Jitter (200–500 ms) so N followers don't all pounce on the same millisecond when the lock
+          // disappears (leader release). Combined with the O_EXCL acquire in refreshLeadership this
+          // still yields a single winner, but spreading the attempts avoids a burst of EEXIST churn
+          // and the thundering-herd wakeups that used to make leadership flap every 1–3 minutes.
+          const delay = 200 + Math.floor(Math.random() * 300);
+          this.watchT = setTimeout(() => this.sync(), delay);
         }
       });
       this.watcher.unref?.();

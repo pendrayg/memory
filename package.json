@@ -1,6 +1,6 @@
 {
   "name": "memory",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "description": "Persistent memory for Claude Code (SQLite + FTS5) — capture via hooks, search via MCP.",
   "type": "module",
   "private": true,

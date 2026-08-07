@@ -179,6 +179,12 @@ export class MemoryServer {
     this.executor = this.remote;
     this.backfill.stop();
     this.digest.stop();
+    // Free the loaded models: an ex-leader must not keep pinning its embedder + reranker ONNX
+    // sessions (~2 GB for e5-large) — that is what let RAM balloon when leadership flapped. Queries
+    // now route to the new leader's loopback service (remote executor); if this process becomes
+    // leader again, the hosts lazily re-load. Best-effort (dispose() swallows in-flight errors).
+    this.embedder.dispose();
+    this.reranker.dispose();
   }
 
   private logStartupDiagnostics(): void {
