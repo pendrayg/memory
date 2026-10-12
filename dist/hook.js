@@ -158,7 +158,8 @@ var COLS = [
   "doc_id",
   "title",
   "labels",
-  "fetched_at"
+  "fetched_at",
+  "active_ms"
 ];
 var FTS_COLS = ["summary", "user_prompt", "assistant_text", "tool_brief", "prompts_text"];
 var BM25_WEIGHTS = "3.0, 2.0, 1.0, 1.0, 1.5";
@@ -233,7 +234,8 @@ function rowToDoc(r) {
     doc_id: r.doc_id ?? void 0,
     title: r.title ?? void 0,
     labels: jsonArr(r.labels),
-    fetched_at: r.fetched_at ?? void 0
+    fetched_at: r.fetched_at ?? void 0,
+    active_ms: r.active_ms == null ? void 0 : Number(r.active_ms)
   };
 }
 function toBlob(arr) {
@@ -297,7 +299,8 @@ var MemoryStore = class _MemoryStore {
         prompts TEXT, prompts_text TEXT,
         turn_count INTEGER, started_at TEXT, ended_at TEXT, end_reason TEXT, source TEXT,
         satisfaction REAL, mood TEXT,
-        url TEXT, doc_id TEXT, title TEXT, labels TEXT, fetched_at TEXT
+        url TEXT, doc_id TEXT, title TEXT, labels TEXT, fetched_at TEXT,
+        active_ms INTEGER
       );
     `);
     this.ensureColumn("memories", "satisfaction", "REAL");
@@ -307,6 +310,7 @@ var MemoryStore = class _MemoryStore {
     this.ensureColumn("memories", "title", "TEXT");
     this.ensureColumn("memories", "labels", "TEXT");
     this.ensureColumn("memories", "fetched_at", "TEXT");
+    this.ensureColumn("memories", "active_ms", "INTEGER");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_mem_doc ON memories(type, doc_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_mem_recent ON memories(project, type, ts_epoch);");
     this.db.exec(`
@@ -397,7 +401,8 @@ var MemoryStore = class _MemoryStore {
       doc_id: d.doc_id ?? null,
       title: d.title ?? null,
       labels: JSON.stringify(d.labels ?? []),
-      fetched_at: d.fetched_at ?? null
+      fetched_at: d.fetched_at ?? null,
+      active_ms: d.active_ms ?? null
     };
     return COLS.map((c) => map[c]);
   }
@@ -627,6 +632,25 @@ var MemoryStore = class _MemoryStore {
       }
     }
     return { dbPath: this.dbPath, total, byType, byProject, vectorEnabled: this._vectorEnabled, vectorCount };
+  }
+  /**
+   * Production (active) time per session for a set of session_ids. Only `session` rollups carry the
+   * metric; sessions predating the feature (or with no tracked activity) come back with active_ms 0.
+   */
+  productionForSessions(sessionIds) {
+    if (sessionIds.length === 0) return [];
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT session_id, active_ms, project, ts, ended_at, summary
+         FROM memories WHERE type='session' AND session_id IN (${placeholders});`
+    ).all(...sessionIds);
+    return rows.map((r) => ({
+      session_id: r.session_id,
+      active_ms: r.active_ms == null ? 0 : Number(r.active_ms),
+      project: r.project ?? void 0,
+      ts: r.ended_at ?? r.ts ?? void 0,
+      summary: r.summary ?? void 0
+    }));
   }
   // ---- Digests (LLM session compression) -------------------------------------------------
   /** Turns of a session, in order — the raw material fed to the digest LLM. */
@@ -923,7 +947,9 @@ function defaultState() {
     filesRead: [],
     tools: [],
     startedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    injected: []
+    injected: [],
+    activeMs: 0,
+    lastActivityEpoch: 0
   };
 }
 function stateDir(cfg) {
@@ -1165,6 +1191,14 @@ function readStdin() {
     setTimeout(() => resolve(data), 4e3).unref?.();
   });
 }
+function markActivity(state, idleGapMs) {
+  const now = Date.now();
+  if (state.lastActivityEpoch > 0) {
+    const gap = now - state.lastActivityEpoch;
+    if (gap > 0 && gap <= idleGapMs) state.activeMs += gap;
+  }
+  state.lastActivityEpoch = now;
+}
 function baseFields(payload, state) {
   return {
     session_id: payload.session_id,
@@ -1229,6 +1263,7 @@ async function handlePrompt(cfg, store, payload) {
   state.project = projectFromCwd(payload.cwd);
   state.branch = gitBranch(payload.cwd);
   state.cwd = payload.cwd;
+  markActivity(state, cfg.productionIdleGapMs);
   state.promptNumber += 1;
   state.prompts.push(payload.prompt.slice(0, 4e3));
   const promptId = `${payload.session_id}:prompt:${state.promptNumber}`;
@@ -1278,6 +1313,7 @@ async function buildRecall(cfg, store, prompt, state, promptId) {
 function handleObserve(cfg, store, payload) {
   if (!payload.session_id || !payload.tool_name) return CONTINUE;
   const state = loadState(cfg, payload.session_id);
+  markActivity(state, cfg.productionIdleGapMs);
   state.obsSeq += 1;
   const { filesRead, filesModified } = filesFromToolInput(payload.tool_name, payload.tool_input);
   const brief = toolBrief(payload.tool_name, payload.tool_input);
@@ -1301,6 +1337,7 @@ function handleObserve(cfg, store, payload) {
 function handleStop(cfg, store, payload) {
   if (!payload.session_id || !payload.transcript_path) return CONTINUE;
   const state = loadState(cfg, payload.session_id);
+  markActivity(state, cfg.productionIdleGapMs);
   const { turn, totalLines } = readNewTurn(payload.transcript_path, state.lines);
   state.lines = totalLines;
   if (!turn.hasContent) {
@@ -1345,7 +1382,8 @@ function handleSessionEnd(cfg, store, payload) {
     turn_count: state.turnSeq,
     started_at: state.startedAt,
     ended_at: nowIso(),
-    end_reason: payload.reason
+    end_reason: payload.reason,
+    active_ms: state.activeMs
   };
   store.upsert(`${payload.session_id}:session`, doc);
   clearState(cfg, payload.session_id);

@@ -42,6 +42,8 @@ export interface MemoryDoc {
   started_at?: string;
   ended_at?: string;
   end_reason?: string;
+  /** Production (active) time of the session in ms — idle-capped. Set on `session` docs. */
+  active_ms?: number;
   source?: string;
   /** User satisfaction across the session, in [0, 1] (0.5 = neutral). Set on digest/insight docs. */
   satisfaction?: number;
@@ -112,7 +114,7 @@ const COLS = [
   'prompt_number', 'user_prompt', 'assistant_text', 'summary', 'tool_name', 'tool_brief',
   'tools', 'files_read', 'files_modified', 'prompts', 'prompts_text', 'turn_count',
   'started_at', 'ended_at', 'end_reason', 'source', 'satisfaction', 'mood',
-  'url', 'doc_id', 'title', 'labels', 'fetched_at',
+  'url', 'doc_id', 'title', 'labels', 'fetched_at', 'active_ms',
 ] as const;
 
 const FTS_COLS = ['summary', 'user_prompt', 'assistant_text', 'tool_brief', 'prompts_text'];
@@ -203,6 +205,7 @@ function rowToDoc(r: any): MemoryDoc {
     title: r.title ?? undefined,
     labels: jsonArr(r.labels),
     fetched_at: r.fetched_at ?? undefined,
+    active_ms: r.active_ms == null ? undefined : Number(r.active_ms),
   };
 }
 
@@ -279,7 +282,8 @@ export class MemoryStore {
         prompts TEXT, prompts_text TEXT,
         turn_count INTEGER, started_at TEXT, ended_at TEXT, end_reason TEXT, source TEXT,
         satisfaction REAL, mood TEXT,
-        url TEXT, doc_id TEXT, title TEXT, labels TEXT, fetched_at TEXT
+        url TEXT, doc_id TEXT, title TEXT, labels TEXT, fetched_at TEXT,
+        active_ms INTEGER
       );
     `);
     // Columns added after the initial schema: a CREATE TABLE IF NOT EXISTS won't add them to an
@@ -291,6 +295,7 @@ export class MemoryStore {
     this.ensureColumn('memories', 'title', 'TEXT');
     this.ensureColumn('memories', 'labels', 'TEXT');
     this.ensureColumn('memories', 'fetched_at', 'TEXT');
+    this.ensureColumn('memories', 'active_ms', 'INTEGER');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_mem_doc ON memories(type, doc_id);');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_mem_recent ON memories(project, type, ts_epoch);');
     this.db.exec(`
@@ -400,6 +405,7 @@ export class MemoryStore {
       title: d.title ?? null,
       labels: JSON.stringify(d.labels ?? []),
       fetched_at: d.fetched_at ?? null,
+      active_ms: d.active_ms ?? null,
     };
     return COLS.map((c) => map[c]);
   }
@@ -688,6 +694,30 @@ export class MemoryStore {
       }
     }
     return { dbPath: this.dbPath, total, byType, byProject, vectorEnabled: this._vectorEnabled, vectorCount };
+  }
+
+  /**
+   * Production (active) time per session for a set of session_ids. Only `session` rollups carry the
+   * metric; sessions predating the feature (or with no tracked activity) come back with active_ms 0.
+   */
+  productionForSessions(
+    sessionIds: string[],
+  ): Array<{ session_id: string; active_ms: number; project?: string; ts?: string; summary?: string }> {
+    if (sessionIds.length === 0) return [];
+    const placeholders = sessionIds.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, active_ms, project, ts, ended_at, summary
+         FROM memories WHERE type='session' AND session_id IN (${placeholders});`,
+      )
+      .all(...sessionIds);
+    return rows.map((r: any) => ({
+      session_id: r.session_id,
+      active_ms: r.active_ms == null ? 0 : Number(r.active_ms),
+      project: r.project ?? undefined,
+      ts: r.ended_at ?? r.ts ?? undefined,
+      summary: r.summary ?? undefined,
+    }));
   }
 
   // ---- Digests (LLM session compression) -------------------------------------------------

@@ -2,17 +2,17 @@ import { existsSync, copyFileSync, mkdirSync, readFileSync, writeFileSync, readd
 import path from 'node:path';
 
 /**
- * Process name shown by monitoring tools: "yoannyviquel_memory_<tier>" instead of "node".
+ * Process name shown by monitoring tools: "pendrayg_memory_<tier>" instead of "node".
  * No "claude-code" prefix — the server already runs *under* the Claude Code process. The tier suffix
  * (light | medium | heavy) tells which embedding model is loaded.
  */
 export function processName(tier: string): string {
   const safe = (tier || 'light').toLowerCase().replace(/[^a-z0-9]+/g, '');
-  return `yoannyviquel_memory_${safe}`;
+  return `pendrayg_memory_${safe}`;
 }
 
 /**
- * Windows: make the server run under a "yoannyviquel_memory_<tier>.exe" image name instead of "node.exe".
+ * Windows: make the server run under a "pendrayg_memory_<tier>.exe" image name instead of "node.exe".
  *
  * Done at startup (not postinstall) on purpose: Claude Code installs plugin deps with
  * `npm install --ignore-scripts`, so postinstall never runs — but the MCP server is always launched.
@@ -21,7 +21,7 @@ export function processName(tier: string): string {
  * `/reload-plugins`, the server relaunches from the renamed copy. Entirely best-effort and cosmetic.
  *
  * Because the name carries the tier, a tier switch produces a new target name; stale
- * yoannyviquel_memory_*.exe copies from previous tiers are pruned (skipping the one in use).
+ * pendrayg_memory_*.exe copies from previous tiers are pruned (skipping the one in use).
  */
 export function ensureNamedBinary(name: string): void {
   if (process.env.MEMORY_DISABLE_RENAME === '1') return; // tests / dev: don't copy the exe or touch .mcp.json
@@ -45,7 +45,7 @@ export function ensureNamedBinary(name: string): void {
       const running = path.basename(process.execPath).toLowerCase();
       for (const f of readdirSync(binDir)) {
         const low = f.toLowerCase();
-        if (low.startsWith('yoannyviquel_memory_') && low.endsWith('.exe') && low !== `${name}.exe` && low !== running) {
+        if (low.startsWith('pendrayg_memory_') && low.endsWith('.exe') && low !== `${name}.exe` && low !== running) {
           unlinkSync(path.join(binDir, f));
         }
       }

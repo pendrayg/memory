@@ -10,10 +10,10 @@ A lightweight alternative to claude-mem: **embedded database, local embeddings, 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-8b5cf6?style=for-the-badge&logo=anthropic&logoColor=white)](https://docs.claude.com/en/docs/claude-code)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A5_22.5-3c873a?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-6e7681?style=for-the-badge)](./LICENSE)
-[![marketplace](https://img.shields.io/badge/marketplace-yoannyviquel-14b8a6?style=for-the-badge)](https://github.com/yoannyviquel/marketplace)
+[![marketplace](https://img.shields.io/badge/marketplace-pendrayg-14b8a6?style=for-the-badge)](https://github.com/pendrayg/marketplace)
 
 ```sh
-/plugin marketplace add yoannyviquel/marketplace
+/plugin marketplace add pendrayg/marketplace
 /plugin install memory
 ```
 
@@ -61,13 +61,13 @@ Recall is automatic — but you can also search on demand:
 The plugin ships with its build artifacts committed (`dist/`), so **no `npm install` / build is needed** — add the marketplace and install:
 
 ```text
-/plugin marketplace add yoannyviquel/marketplace
+/plugin marketplace add pendrayg/marketplace
 /plugin install memory
 ```
 
 Restart Claude Code (or `/reload-plugins`) to activate the hooks + MCP server.
 
-> The `yoannyviquel/marketplace` catalogue references this plugin by its own GitHub repo (`github.com/yoannyviquel/memory`, ref `main`); each plugin updates independently of the catalogue.
+> The `pendrayg/marketplace` catalogue references this plugin by its own GitHub repo (`github.com/pendrayg/memory`, ref `main`); each plugin updates independently of the catalogue.
 
 <details>
 <summary><b>From source (local development)</b></summary>
@@ -81,7 +81,7 @@ npm run build      # -> dist/server.js, dist/hook.js, dist/migrate.js, dist/vec0
 Then add the local checkout as a marketplace and install:
 
 ```text
-/plugin marketplace add C:/tfs/yoannyviquel/memory
+/plugin marketplace add C:/tfs/pendrayg/memory
 /plugin install memory
 ```
 
@@ -381,6 +381,6 @@ If anything fails (locked database, unavailable model, missing sqlite-vec), ever
 
 <div align="center">
 
-MIT © yoannyviquel · Part of the [**yoannyviquel** marketplace](https://github.com/yoannyviquel/marketplace)
+MIT © pendrayg · Part of the [**pendrayg** marketplace](https://github.com/pendrayg/marketplace)
 
 </div>

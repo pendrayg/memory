@@ -163,7 +163,8 @@ var COLS = [
   "doc_id",
   "title",
   "labels",
-  "fetched_at"
+  "fetched_at",
+  "active_ms"
 ];
 var FTS_COLS = ["summary", "user_prompt", "assistant_text", "tool_brief", "prompts_text"];
 var BM25_WEIGHTS = "3.0, 2.0, 1.0, 1.0, 1.5";
@@ -238,7 +239,8 @@ function rowToDoc(r) {
     doc_id: r.doc_id ?? void 0,
     title: r.title ?? void 0,
     labels: jsonArr(r.labels),
-    fetched_at: r.fetched_at ?? void 0
+    fetched_at: r.fetched_at ?? void 0,
+    active_ms: r.active_ms == null ? void 0 : Number(r.active_ms)
   };
 }
 function toBlob(arr) {
@@ -302,7 +304,8 @@ var MemoryStore = class _MemoryStore {
         prompts TEXT, prompts_text TEXT,
         turn_count INTEGER, started_at TEXT, ended_at TEXT, end_reason TEXT, source TEXT,
         satisfaction REAL, mood TEXT,
-        url TEXT, doc_id TEXT, title TEXT, labels TEXT, fetched_at TEXT
+        url TEXT, doc_id TEXT, title TEXT, labels TEXT, fetched_at TEXT,
+        active_ms INTEGER
       );
     `);
     this.ensureColumn("memories", "satisfaction", "REAL");
@@ -312,6 +315,7 @@ var MemoryStore = class _MemoryStore {
     this.ensureColumn("memories", "title", "TEXT");
     this.ensureColumn("memories", "labels", "TEXT");
     this.ensureColumn("memories", "fetched_at", "TEXT");
+    this.ensureColumn("memories", "active_ms", "INTEGER");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_mem_doc ON memories(type, doc_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_mem_recent ON memories(project, type, ts_epoch);");
     this.db.exec(`
@@ -402,7 +406,8 @@ var MemoryStore = class _MemoryStore {
       doc_id: d.doc_id ?? null,
       title: d.title ?? null,
       labels: JSON.stringify(d.labels ?? []),
-      fetched_at: d.fetched_at ?? null
+      fetched_at: d.fetched_at ?? null,
+      active_ms: d.active_ms ?? null
     };
     return COLS.map((c) => map[c]);
   }
@@ -632,6 +637,25 @@ var MemoryStore = class _MemoryStore {
       }
     }
     return { dbPath: this.dbPath, total, byType, byProject, vectorEnabled: this._vectorEnabled, vectorCount };
+  }
+  /**
+   * Production (active) time per session for a set of session_ids. Only `session` rollups carry the
+   * metric; sessions predating the feature (or with no tracked activity) come back with active_ms 0.
+   */
+  productionForSessions(sessionIds) {
+    if (sessionIds.length === 0) return [];
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT session_id, active_ms, project, ts, ended_at, summary
+         FROM memories WHERE type='session' AND session_id IN (${placeholders});`
+    ).all(...sessionIds);
+    return rows.map((r) => ({
+      session_id: r.session_id,
+      active_ms: r.active_ms == null ? 0 : Number(r.active_ms),
+      project: r.project ?? void 0,
+      ts: r.ended_at ?? r.ts ?? void 0,
+      summary: r.summary ?? void 0
+    }));
   }
   // ---- Digests (LLM session compression) -------------------------------------------------
   /** Turns of a session, in order — the raw material fed to the digest LLM. */

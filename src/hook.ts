@@ -39,6 +39,19 @@ function readStdin(): Promise<string> {
   });
 }
 
+// Production ("temps de production") accounting: sum the gaps between consecutive activity events
+// (prompt / tool use / turn), each gap capped at cfg.productionIdleGapMs so a walk-away pause doesn't
+// inflate the total. ponytail: session-granularity, idle-capped heuristic — estimates effort, not a
+// stopwatch; the cap is the calibration knob (see config.productionIdleGapMs).
+function markActivity(state: SessionState, idleGapMs: number): void {
+  const now = Date.now();
+  if (state.lastActivityEpoch > 0) {
+    const gap = now - state.lastActivityEpoch;
+    if (gap > 0 && gap <= idleGapMs) state.activeMs += gap;
+  }
+  state.lastActivityEpoch = now;
+}
+
 function baseFields(payload: HookPayload, state: SessionState): Partial<MemoryDoc> {
   return {
     session_id: payload.session_id,
@@ -142,6 +155,7 @@ async function handlePrompt(cfg: MemoryConfig, store: MemoryStore, payload: Hook
   state.project = projectFromCwd(payload.cwd);
   state.branch = gitBranch(payload.cwd);
   state.cwd = payload.cwd;
+  markActivity(state, cfg.productionIdleGapMs);
   state.promptNumber += 1;
   state.prompts.push(payload.prompt.slice(0, 4000));
 
@@ -213,6 +227,7 @@ async function buildRecall(
 function handleObserve(cfg: MemoryConfig, store: MemoryStore, payload: HookPayload): string {
   if (!payload.session_id || !payload.tool_name) return CONTINUE;
   const state = loadState(cfg, payload.session_id);
+  markActivity(state, cfg.productionIdleGapMs);
   state.obsSeq += 1;
   const { filesRead, filesModified } = filesFromToolInput(payload.tool_name, payload.tool_input);
   const brief = toolBrief(payload.tool_name, payload.tool_input);
@@ -239,6 +254,7 @@ function handleObserve(cfg: MemoryConfig, store: MemoryStore, payload: HookPaylo
 function handleStop(cfg: MemoryConfig, store: MemoryStore, payload: HookPayload): string {
   if (!payload.session_id || !payload.transcript_path) return CONTINUE;
   const state = loadState(cfg, payload.session_id);
+  markActivity(state, cfg.productionIdleGapMs);
   const { turn, totalLines } = readNewTurn(payload.transcript_path, state.lines);
   state.lines = totalLines;
   if (!turn.hasContent) {
@@ -286,6 +302,7 @@ function handleSessionEnd(cfg: MemoryConfig, store: MemoryStore, payload: HookPa
     started_at: state.startedAt,
     ended_at: nowIso(),
     end_reason: payload.reason,
+    active_ms: state.activeMs,
   };
   store.upsert(`${payload.session_id}:session`, doc);
   clearState(cfg, payload.session_id);

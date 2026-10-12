@@ -18,6 +18,10 @@ export interface SessionState {
   startedAt: string;
   /** mem_ids already injected into this session's context (SessionStart + auto-recall) → dedup. */
   injected: string[];
+  /** Accumulated production (active) time in ms — sum of idle-capped gaps between activity events. */
+  activeMs: number;
+  /** Epoch (ms) of the last activity event; 0 = none yet. Drives the gap in markActivity. */
+  lastActivityEpoch: number;
 }
 
 function defaultState(): SessionState {
@@ -32,6 +36,8 @@ function defaultState(): SessionState {
     tools: [],
     startedAt: new Date().toISOString(),
     injected: [],
+    activeMs: 0,
+    lastActivityEpoch: 0,
   };
 }
 
