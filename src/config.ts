@@ -31,6 +31,19 @@ export interface MemoryConfig {
    * Default 5 min; floored at 1 min. See markActivity in hook.ts.
    */
   productionIdleGapMs: number;
+  /**
+   * Loopback port of the shared MCP daemon (`--http`). FIXED, because `.mcp.json` carries a static
+   * URL and because binding it is what keeps a single daemon alive (see {@link startMcpHttp}).
+   * Change it (env or config.json) only if another program on this machine owns the port — then
+   * `.mcp.json` must be edited to match.
+   */
+  mcpPort: number;
+  /**
+   * How long the daemon may sit with no MCP call and no hook embedding before exiting, in ms.
+   * Calibration knob: too short re-pays the model load (~seconds, GBs of RAM churn) all day; too
+   * long keeps the heavy tier resident long after the last window closed. Default 30 min.
+   */
+  mcpIdleExitMs: number;
 }
 
 export interface AutoRecallConfig {
@@ -92,6 +105,9 @@ export const EMBED_TIERS: Record<
   },
 };
 const DEFAULT_TIER = 'light';
+
+/** Keep in sync with the URL in `.mcp.json` — the client's config can't read this file. */
+export const DEFAULT_MCP_PORT = 47832;
 
 /**
  * Resolves the ONNX device string. '' = CPU (default). 'auto' picks the platform's bundled GPU EP
@@ -235,6 +251,13 @@ export function loadConfig(): MemoryConfig {
     src.num('MEMORY_PRODUCTION_IDLE_GAP_MS', 'productionIdleGapMs', 300_000),
   );
 
+  // Shared MCP daemon. 47832 is arbitrary but deliberate: below Windows' ephemeral range (49152+),
+  // so the OS can never hand it to someone else and make the daemon think a sibling is already up.
+  const mcpPort = src.num('MEMORY_MCP_PORT', 'mcpPort', DEFAULT_MCP_PORT);
+  // Floored at 1 min: a near-zero value would have the daemon exit between two prompts and reload
+  // the model each time — strictly worse than the stdio shape it replaces.
+  const mcpIdleExitMs = Math.max(60_000, src.num('MEMORY_MCP_IDLE_EXIT_MS', 'mcpIdleExitMs', 1_800_000));
+
   return {
     dbPath,
     dataDir,
@@ -246,5 +269,7 @@ export function loadConfig(): MemoryConfig {
     satisfactionWeight,
     loadPercent,
     productionIdleGapMs,
+    mcpPort,
+    mcpIdleExitMs,
   };
 }

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 export const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = path.join(REPO, 'dist', 'server.js');
@@ -30,6 +31,9 @@ export function baseEnv(dataDir, extra = {}) {
     MEMORY_DATA_DIR: dataDir,
     MEMORY_DB_PATH: path.join(dataDir, 'memories.db'),
     MEMORY_DISABLE_RENAME: '1',
+    // Hooks spawn the shared daemon on a FIXED port — in tests that would hit the developer's own
+    // running daemon (or leave one behind). Tests drive stdio servers explicitly instead.
+    MEMORY_MCP_HTTP: '0',
     MEMORY_DIGEST_ENABLED: '0',
     MEMORY_RERANK_ENABLED: '0',
     MEMORY_EMBED_TIER: 'light',
@@ -99,6 +103,39 @@ export async function startServer(env) {
       }
     },
   };
+}
+
+/**
+ * Spawns dist/server.js as the shared HTTP daemon on `port`, resolving once it answers /health.
+ * Returns the child so a test can observe its exit (the race loser exits 0).
+ */
+export function startHttpDaemon(env, port, { wait = true } = {}) {
+  const child = spawn('node', [SERVER, '--http'], {
+    env: { ...env, MEMORY_MCP_PORT: String(port) },
+    stdio: 'ignore',
+  });
+  if (!wait) return Promise.resolve(child);
+  return pollUntil(async () => ((await httpHealth(port)) ? child : null), {
+    timeoutMs: 30_000,
+    label: `daemon up on ${port}`,
+  });
+}
+
+/** True if OUR daemon answers the health probe on `port`. */
+export async function httpHealth(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    return (await res.text()).trim() === 'memory-mcp';
+  } catch {
+    return false;
+  }
+}
+
+/** Connects one MCP client to the HTTP daemon. Several may share a single daemon — that's the point. */
+export async function connectHttp(port) {
+  const client = new Client({ name: 'e2e-http', version: '1.0.0' }, { capabilities: {} });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+  return client;
 }
 
 /** Calls a tool and returns the concatenated text content. */

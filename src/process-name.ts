@@ -1,4 +1,4 @@
-import { existsSync, copyFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { existsSync, copyFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -12,13 +12,17 @@ export function processName(tier: string): string {
 }
 
 /**
- * Windows: make the server run under a "pendrayg_memory_<tier>.exe" image name instead of "node.exe".
+ * Windows: make the daemon run under a "pendrayg_memory_<tier>.exe" image name instead of "node.exe".
  *
  * Done at startup (not postinstall) on purpose: Claude Code installs plugin deps with
- * `npm install --ignore-scripts`, so postinstall never runs — but the MCP server is always launched.
- * The current process can't rename itself, so we self-heal for the NEXT launch: copy the running node
- * binary to <pluginRoot>/bin/<name>.exe and repoint .mcp.json#command at it. After the post-install
- * `/reload-plugins`, the server relaunches from the renamed copy. Entirely best-effort and cosmetic.
+ * `npm install --ignore-scripts`, so postinstall never runs — but the server is always launched.
+ * The current process can't rename itself, so we self-heal for the NEXT launch: copy the running
+ * node binary to <pluginRoot>/bin/<name>.exe, which {@link spawnDaemon} prefers over `node`.
+ * Entirely best-effort and cosmetic.
+ *
+ * It used to repoint `.mcp.json#command` instead — dead, and harmful, since the switch to an HTTP
+ * endpoint: the MCP client no longer spawns anything, so an injected `command` would just sit in a
+ * config that describes a URL. The hook that spawns the daemon picks the exe up directly.
  *
  * Because the name carries the tier, a tier switch produces a new target name; stale
  * pendrayg_memory_*.exe copies from previous tiers are pruned (skipping the one in use).
@@ -51,14 +55,6 @@ export function ensureNamedBinary(name: string): void {
       }
     } catch {
       /* best-effort prune */
-    }
-
-    const mcpPath = path.join(root, '.mcp.json');
-    const desired = '${CLAUDE_PLUGIN_ROOT}/bin/' + name + '.exe';
-    const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
-    if (mcp?.mcpServers?.memory && mcp.mcpServers.memory.command !== desired) {
-      mcp.mcpServers.memory.command = desired;
-      writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + '\n');
     }
   } catch {
     /* best-effort: cosmetic rename must never block startup */

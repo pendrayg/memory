@@ -17,9 +17,13 @@ import { processName, ensureNamedBinary } from './process-name.js';
 import { allTools } from './tools/index.js';
 import type { ToolContext } from './tools/types.js';
 import { log, writeStatus } from './log.js';
+import { idleMs } from './activity.js';
 
 declare const __PKG_VERSION__: string;
 const PKG_VERSION = typeof __PKG_VERSION__ !== 'undefined' ? __PKG_VERSION__ : '0.0.0-dev';
+
+/** How often the daemon re-reads the idle clock. Coarse on purpose — this costs nothing to be late. */
+const IDLE_CHECK_MS = 60_000;
 
 /**
  * Composition root + facade over the memory subsystem. Owns the dependency graph (store, model
@@ -80,16 +84,12 @@ export class MemoryServer {
     return this.executor.rerankQuery(query, docs);
   }
 
-  async start(): Promise<void> {
-    const name = processName(this.config.embed.tier);
-    // On Linux/macOS process.title rewrites the cmdline; Windows needs the renamed exe copy.
-    try {
-      process.title = name;
-    } catch {
-      /* best-effort: never block startup on a cosmetic rename */
-    }
-    ensureNamedBinary(name);
-
+  /**
+   * Builds an MCP server bound to this instance's tools. One per connected client: the object is
+   * just a handler table — the weight (store, models) lives in the context it closes over, shared
+   * by every client. stdio builds exactly one; the HTTP daemon builds one per session.
+   */
+  buildMcpServer(): Server {
     const ctx: ToolContext = {
       store: this.store,
       embedCfg: this.config.embed,
@@ -116,10 +116,29 @@ export class MemoryServer {
         return { content: [{ type: 'text', text: `❌ ${tool.name} failed: ${message}` }], isError: true };
       }
     });
+    return server;
+  }
 
-    await server.connect(new StdioServerTransport());
+  /**
+   * Boots the subsystem. `mode` only decides who talks to the MCP surface:
+   *  - `stdio`: this process serves its one parent session and dies with it (legacy shape).
+   *  - `http`: the caller already bound the endpoint (see {@link startMcpHttp}); this process is a
+   *    detached daemon serving every session, so it must NOT die with any one stdin, and needs the
+   *    idle watchdog below to ever go away.
+   */
+  async start(mode: 'stdio' | 'http' = 'stdio'): Promise<void> {
+    const name = processName(this.config.embed.tier);
+    // On Linux/macOS process.title rewrites the cmdline; Windows needs the renamed exe copy.
+    try {
+      process.title = name;
+    } catch {
+      /* best-effort: never block startup on a cosmetic rename */
+    }
+    ensureNamedBinary(name);
+
+    if (mode === 'stdio') await this.buildMcpServer().connect(new StdioServerTransport());
     process.stderr.write(
-      `memory v${PKG_VERSION} ready (stdio) → ${this.config.dbPath} | vectors: ${this.store.vectorEnabled ? 'on' : 'off'}\n`,
+      `memory v${PKG_VERSION} ready (${mode}) → ${this.config.dbPath} | vectors: ${this.store.vectorEnabled ? 'on' : 'off'}\n`,
     );
 
     this.logStartupDiagnostics();
@@ -131,9 +150,8 @@ export class MemoryServer {
     this.coordinator.start();
     log(this.config.dataDir, `[server] leader=${this.coordinator.isLeader()} (pid ${process.pid})`);
 
-    // Release leadership the instant this session closes so a sibling takes over on its next
-    // heartbeat instead of waiting out the stale timeout. Window close ends stdin (Windows) or sends
-    // a signal (POSIX); both paths clean up. A hard kill falls back to STALE_MS.
+    // Release leadership the instant this process goes away so a sibling takes over on its next
+    // heartbeat instead of waiting out the stale timeout. A hard kill falls back to STALE_MS.
     let releasing = false;
     const releaseAndExit = () => {
       if (releasing) return;
@@ -143,8 +161,36 @@ export class MemoryServer {
     };
     process.on('SIGTERM', releaseAndExit);
     process.on('SIGINT', releaseAndExit);
-    process.stdin.on('end', releaseAndExit);
-    process.stdin.on('close', releaseAndExit);
+
+    if (mode === 'stdio') {
+      // Closing the client window ends stdin (Windows) or signals (POSIX); both clean up. The HTTP
+      // daemon has no parent session, and its stdin is ignored — wiring these there would make it
+      // exit the moment it is spawned detached.
+      process.stdin.on('end', releaseAndExit);
+      process.stdin.on('close', releaseAndExit);
+    } else {
+      this.watchIdle(releaseAndExit);
+    }
+  }
+
+  /**
+   * Daemon lifetime. stdio gave this for free (the server died with its session); a shared daemon
+   * has to decide for itself, or the heavy tier would sit on ~676 MB forever after the last window
+   * closed — the very cost this transport was meant to cut.
+   *
+   * Keyed off REQUEST TIME, not open MCP sessions: a client killed without a DELETE leaves its
+   * session in the transport map, so counting sessions would keep the daemon alive forever.
+   * Anything unfinished (vector backfill, digests) resumes on the next spawn — both loops are
+   * incremental and idempotent.
+   */
+  private watchIdle(exit: () => void): void {
+    const timer = setInterval(() => {
+      if (idleMs() < this.config.mcpIdleExitMs) return;
+      log(this.config.dataDir, `[server] idle ${Math.round(idleMs() / 60_000)} min → exit`);
+      clearInterval(timer);
+      exit();
+    }, IDLE_CHECK_MS);
+    timer.unref?.();
   }
 
   /** Just acquired leadership (startup or failover): swap to local, start the service + loops. */

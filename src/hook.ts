@@ -13,6 +13,7 @@ import {
 } from './memory.js';
 import { readLock } from './leader.js';
 import { remoteEmbed } from './embed-service.js';
+import { ensureDaemon } from './daemon.js';
 
 interface HookPayload {
   session_id?: string;
@@ -332,6 +333,11 @@ async function main(): Promise<void> {
     }
     store = new MemoryStore(cfg.dbPath, cfg.embed.dim, cfg.embed.model, EMBED_TEXT_VERSION);
     await store.init();
+
+    // The MCP client only dials a URL now — nothing spawns the shared daemon but us. Session start
+    // covers the cold case; every prompt covers the one where it idled out mid-session.
+    if (mode === 'sessionstart') await ensureDaemon(cfg, 8_000);
+    else if (mode === 'prompt') await ensureDaemon(cfg);
 
     switch (mode) {
       case 'sessionstart':

@@ -4,9 +4,9 @@
 
 ### Persistent memory for Claude Code — **local SQLite**, **hybrid BM25 + semantic** search.
 
-A lightweight alternative to claude-mem: **embedded database, local embeddings, zero server, zero daemon, zero cloud.** The hooks never block Claude Code.
+A lightweight alternative to claude-mem: **embedded database, local embeddings, one shared loopback daemon, zero cloud.** The hooks never block Claude Code.
 
-[![version](https://img.shields.io/badge/version-0.12.0-8b5cf6?style=for-the-badge)](./.claude-plugin/plugin.json)
+[![version](https://img.shields.io/badge/version-0.14.0-8b5cf6?style=for-the-badge)](./.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-8b5cf6?style=for-the-badge&logo=anthropic&logoColor=white)](https://docs.claude.com/en/docs/claude-code)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A5_22.5-3c873a?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-6e7681?style=for-the-badge)](./LICENSE)
@@ -27,7 +27,7 @@ A lightweight alternative to claude-mem: **embedded database, local embeddings, 
 
 | | Feature | What it gives you |
 |---|---|---|
-| 🗄️ | **Embedded SQLite** | A library + a file, opened in-process. No server, no daemon, no fragile Chroma/uvx stack. |
+| 🗄️ | **Embedded SQLite** | A library + a file, opened in-process. No database server, no fragile Chroma/uvx stack. |
 | 🔎 | **Hybrid search** | BM25 (FTS5) for exact identifiers **+** local semantic embeddings (sqlite-vec), fused with Reciprocal Rank Fusion. |
 | 🎯 | **Cross-encoder reranking** | Two-stage retrieval (recall → rerank) for precision that a bigger embedder can't buy on a small base. |
 | 🪝 | **Automatic capture** | Hooks record prompts, tool observations, turns and sessions with **no model loaded** — instant and BM25-searchable. |
@@ -35,7 +35,7 @@ A lightweight alternative to claude-mem: **embedded database, local embeddings, 
 | ⭐ | **Core memories** | Primordial facts injected into every session; created on demand or proposed when a fact recurs. |
 | 📚 | **Ingested docs** | Feed a Confluence page, README or spec into memory (pointer or full chunked body) and search it offline. |
 | 🌍 | **Multilingual tiers** | e5 small / base / large, q8-quantized, switchable live — with optional GPU acceleration. |
-| 🤝 | **Leader failover** | Across N open sessions, one server holds the single loaded model; the rest route just their query vector → **one model in RAM total**. |
+| 🤝 | **One shared daemon** | N open sessions, **one** memory process (loopback HTTP MCP) — no per-session server, and on Windows no `cmd.exe` + `conhost.exe` per session either. |
 | 🛡️ | **Never blocks** | Locked DB, missing model, no sqlite-vec → graceful degrade to BM25. Claude Code is never held up. |
 
 ## 🧠 In action
@@ -102,7 +102,7 @@ Restart Claude Code (or `/reload-plugins`) to activate hooks + MCP server.
   - `PostToolUse` → indexes one observation per tool call (tool, touched files).
   - `Stop` → indexes the assistant turn (text, tools, files).
   - `SessionEnd` → indexes a session summary.
-- **LLM digests** (background, opt-out): the MCP server compresses each finished session into a `digest` (1–3 sentence conclusion) + typed `insight` docs (`decision` / `bugfix` / `discovery` / `conclusion`). These high-signal docs are what `SessionStart` injects and what ranks best in search; raw turns stay as the recall safety net.
+- **LLM digests** (background, opt-out): the daemon compresses each finished session into a `digest` (1–3 sentence conclusion) + typed `insight` docs (`decision` / `bugfix` / `discovery` / `conclusion`). These high-signal docs are what `SessionStart` injects and what ranks best in search; raw turns stay as the recall safety net.
 - **Core memories**: primordial facts injected into **every** session at load. Created explicitly, or **proposed by Claude** when a fact recurs (`memory_core_suggest`). Tools: `memory_core_add` / `memory_core_list` / `memory_core_remove` / `memory_core_suggest`, or `/memory:core`. Global by default, or project-scoped.
 - **Ingested docs** (curated knowledge): feed external documentation into memory so it becomes searchable. The plugin does **no network access** — Claude fetches the content and passes it to `memory_doc_add`. **Tier 1** (pointer: title + URL + summary) and **Tier 2** (full body → vectorized chunks). Idempotent per URL. Tools: `memory_doc_add` / `memory_doc_list` / `memory_doc_remove`. Filter searches with `type: doc`.
 - **Search** via MCP: `memory_search` (hybrid), `memory_recent`, `memory_stats`.
@@ -128,7 +128,7 @@ Restart Claude Code (or `/reload-plugins`) to activate hooks + MCP server.
 flowchart TB
     HOOKS["Claude Code hooks — every session, no model<br/>SessionStart · UserPromptSubmit · PostToolUse · Stop · SessionEnd"]
     DB[("Shared SQLite<br/>memories + FTS5 (BM25) + sqlite-vec")]
-    WORKER["MCP server (background)<br/>backfill = local embeddings<br/>digest = claude -p (Haiku)"]
+    WORKER["Shared daemon (background)<br/>backfill = local embeddings<br/>digest = claude -p (Haiku)"]
     SEARCH["search &amp; tools<br/>BM25 + KNN + RRF"]
 
     HOOKS -->|"prompt / observation / turn / session"| DB
@@ -139,8 +139,8 @@ flowchart TB
 ```
 
 - **Hooks** (every session) capture raw memories with **no model loaded** → instant, BM25-searchable immediately. `SessionStart` injects **core memories + recent digests** into the new session.
-- The **MCP server** does the heavy work in the background: vectorizes pending docs (*backfill*), and compresses finished sessions into LLM **digests** (Haiku).
-- Across several open sessions, **one server is elected leader** (it holds the single loaded model); the others route their query embedding to it.
+- The **daemon** does the heavy work in the background: vectorizes pending docs (*backfill*), and compresses finished sessions into LLM **digests** (Haiku).
+- It is a **single process shared by every open session** (loopback HTTP MCP), so the model is loaded once and no session pays for a server of its own.
 
 ### Auto-recall (systematic memory injection)
 
@@ -229,26 +229,40 @@ When the LLM digests a session it also rates, from **the user's tone alone**, ho
 
 ### Embeddings architecture
 
-The **hooks are ephemeral processes**: loading a model on every hook would be too slow. So the hooks **capture without vectorizing** (immediate BM25). It's the **persistent MCP server** that, in the background (at startup then every 60 s), vectorizes the pending documents (*backfill*) — the model is loaded only once, in that process. Observations (tool calls, mostly identifiers) are not vectorized: BM25 is enough.
+The **hooks are ephemeral processes**: loading a model on every hook would be too slow. So the hooks **capture without vectorizing** (immediate BM25). It's the **persistent daemon** that, in the background (at startup then every 60 s), vectorizes the pending documents (*backfill*) — the model is loaded only once, in that process. Observations (tool calls, mostly identifiers) are not vectorized: BM25 is enough.
 
-### Leader failover (shared model)
+### One shared daemon
 
-Each open Claude Code session spawns its own MCP server (stdio transport). To avoid N servers each loading the model and running redundant loops, the servers elect a single **leader** via a lock file (`<dataDir>/worker.lock`, pid + heartbeat). Only the leader loads the model, runs backfill/digest, and exposes a **loopback embedding service** (`127.0.0.1` + token). Followers run BM25 + KNN locally and route just the **query→vector** step to the leader → **one model in RAM total**.
+The MCP surface is served over **loopback HTTP** (`http://127.0.0.1:47832/mcp`), not stdio. stdio ties the protocol to a process's stdin/stdout, so it forces **one server per session**: 5 open sessions used to mean 5 `memory` processes — one leader (~676 MB on the heavy tier) plus four ~50 MB followers that did nothing but relay to it — each wrapped on Windows in a `cmd.exe` + a `conhost.exe`. Over HTTP all of that collapses into **one process**, and Claude Code spawns nothing at all.
+
+Sharing is safe because the MCP surface is session-agnostic: a tool's scope arrives as its `project` argument, and the only `cwd`-based guess lives in the hooks, which are separate processes fed the session's `cwd` by Claude Code.
+
+| | |
+|---|---|
+| **Who starts it** | The `SessionStart` and `UserPromptSubmit` hooks (nothing else can — the MCP client only dials a URL). Checking on every prompt is what makes it self-healing. |
+| **Only one** | Binding the port *is* the mutex: two sessions racing both spawn a daemon, and the loser exits on `EADDRINUSE`. |
+| **When it stops** | After `mcpIdleExitMs` (default **30 min**) with no MCP call and no hook embedding. The next prompt brings it back; backfill and digests resume where they stopped. |
+| **If the port is taken** | By something else on your machine: set `mcpPort` (or `MEMORY_MCP_PORT`) **and** the URL in `.mcp.json`. The `/health` probe answers `memory-mcp`, so a squatter is never mistaken for the daemon. |
+| **Back to stdio** | `MEMORY_MCP_HTTP=0` stops the hooks spawning a daemon; point `.mcp.json` back at `"type": "stdio"` + `dist/boot.js`. |
+
+### Leader election (shared model)
+
+Leadership (`<dataDir>/worker.lock`, pid + heartbeat) survives the move and still earns its keep: the leader is the process that loads the model, runs backfill/digest, and exposes the **loopback embedding service** (`127.0.0.1` + token) that the **ephemeral hooks** use to embed a query without loading anything. In the normal case the single daemon simply *is* the leader; the election is what hands that role over cleanly when it restarts — or to a stdio server, if you run one.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant F as Follower (no model)
+    participant H as Hook (no model)
     participant K as worker.lock
-    participant L as Leader (has model)
+    participant L as Daemon / leader (has model)
     L->>K: heartbeat — renew pid+ts (~30s)
-    F-->>L: query→vector over loopback (during search)
-    Note over L: user closes the leader window
-    L->>K: release lock (stdin EOF / SIGTERM)
-    K-->>F: fs.watch fires (lock changed)
-    F->>K: acquire leadership
-    Note over F: load model + start embed service (< 1s)
-    Note over F: now the leader
+    H-->>L: query→vector over loopback (during recall)
+    Note over L: 30 min idle, or SIGTERM
+    L->>K: release lock
+    Note over H: next prompt → hook respawns the daemon
+    H->>L: spawn (detached) + /health
+    L->>K: acquire leadership
+    Note over L: load model + start embed service (< 1s)
 ```
 
 Heartbeat is the fallback; a **hard kill** is recovered within `STALE_MS` ≈ 90 s. While no leader is reachable, search degrades to BM25-only — never an error.
@@ -289,7 +303,7 @@ Vectorization runs on **CPU by default**. To use the GPU, set `MEMORY_EMBED_DEVI
 <summary><h2>🎛️ Configuration</h2></summary>
 
 Two mechanisms, **env takes precedence over the file**:
-- File `~/.claude-memory/config.json`, e.g. `{ "embedTier": "medium" }` (keys: `embedTier`, `embedEnabled`, `embedDevice`, `digestEnabled`, `digestModel`, `rerankEnabled`, `rerankModel`, `autoRecall`, `autoRecallLimit`, `satisfactionWeight`, `loadPercent`, `dbPath`, `embedModel`, `embedDim`, `contextLimit`). Editable via `/memory:config`.
+- File `~/.claude-memory/config.json`, e.g. `{ "embedTier": "medium" }` (keys: `embedTier`, `embedEnabled`, `embedDevice`, `digestEnabled`, `digestModel`, `rerankEnabled`, `rerankModel`, `autoRecall`, `autoRecallLimit`, `satisfactionWeight`, `loadPercent`, `dbPath`, `embedModel`, `embedDim`, `contextLimit`, `mcpPort`, `mcpIdleExitMs`). Editable via `/memory:config`.
 - System environment variables (overrides):
 
 | Variable | Default | Role |
@@ -298,6 +312,9 @@ Two mechanisms, **env takes precedence over the file**:
 | `MEMORY_DB_PATH` | `~/.claude-memory/memories.db` | Memories SQLite file |
 | `MEMORY_DATA_DIR` | `~/.claude-memory` | Folder (db + cursors + model cache + config.json) |
 | `MEMORY_CONTEXT_LIMIT` | `10` | Memories injected at `SessionStart` |
+| `MEMORY_MCP_PORT` | `47832` | Loopback port of the shared daemon (must match the URL in `.mcp.json`) |
+| `MEMORY_MCP_IDLE_EXIT_MS` | `1800000` | Idle time before the daemon exits (min 1 min) |
+| `MEMORY_MCP_HTTP` | _(enabled)_ | `0` → hooks never spawn the daemon (per-session stdio servers instead) |
 | `MEMORY_EMBED_ENABLED` | _(enabled)_ | `0` to disable semantic search (BM25 only) |
 | `MEMORY_DIGEST_ENABLED` | _(enabled)_ | `0` to disable LLM session digests (`claude -p`) |
 | `MEMORY_DIGEST_MODEL` | `haiku` | Model for digests (`haiku` / `sonnet` / `opus` / pinned id) |

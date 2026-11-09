@@ -1,12 +1,8 @@
 {
   "mcpServers": {
     "memory": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["--no-warnings", "${CLAUDE_PLUGIN_ROOT}/dist/boot.js"],
-      "env": {
-        "MEMORY_EMBED_TIER": "${user_config.embedTier}"
-      }
+      "type": "http",
+      "url": "http://127.0.0.1:47832/mcp"
     }
   }
 }

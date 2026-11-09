@@ -18,6 +18,7 @@ var EMBED_TIERS = {
   }
 };
 var DEFAULT_TIER = "light";
+var DEFAULT_MCP_PORT = 47832;
 function resolveDevice(raw) {
   if (raw !== "auto") return raw;
   if (process.platform === "win32") return "dml";
@@ -99,6 +100,8 @@ function loadConfig() {
     6e4,
     src.num("MEMORY_PRODUCTION_IDLE_GAP_MS", "productionIdleGapMs", 3e5)
   );
+  const mcpPort = src.num("MEMORY_MCP_PORT", "mcpPort", DEFAULT_MCP_PORT);
+  const mcpIdleExitMs = Math.max(6e4, src.num("MEMORY_MCP_IDLE_EXIT_MS", "mcpIdleExitMs", 18e5));
   return {
     dbPath,
     dataDir,
@@ -109,7 +112,9 @@ function loadConfig() {
     autoRecall: { enabled: autoRecallEnabled, limit: autoRecallLimit },
     satisfactionWeight,
     loadPercent,
-    productionIdleGapMs
+    productionIdleGapMs,
+    mcpPort,
+    mcpIdleExitMs
   };
 }
 
@@ -1138,8 +1143,13 @@ function readLock(dataDir) {
 
 // src/embed-service.ts
 import { createServer, request as httpRequest } from "http";
+
+// src/activity.ts
+var last = Date.now();
+
+// src/embed-service.ts
 var TOKEN_HEADER = "x-mem-token";
-function post(endpoint, path6, body, pick, timeoutMs = 8e3) {
+function post(endpoint, path8, body, pick, timeoutMs = 8e3) {
   return new Promise((resolve) => {
     const data = JSON.stringify(body);
     const req = httpRequest(
@@ -1147,7 +1157,7 @@ function post(endpoint, path6, body, pick, timeoutMs = 8e3) {
         host: "127.0.0.1",
         port: endpoint.port,
         method: "POST",
-        path: path6,
+        path: path8,
         headers: {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(data),
@@ -1177,6 +1187,61 @@ function post(endpoint, path6, body, pick, timeoutMs = 8e3) {
 }
 function remoteEmbed(endpoint, text, timeoutMs = 8e3) {
   return post(endpoint, "/embed", { text }, (j) => Array.isArray(j?.vector) ? j.vector : null, timeoutMs);
+}
+
+// src/daemon.ts
+import { get as httpGet } from "http";
+import { spawn } from "child_process";
+import { existsSync as existsSync3 } from "fs";
+import path7 from "path";
+import { fileURLToPath as fileURLToPath2 } from "url";
+
+// src/process-name.ts
+import { existsSync as existsSync2, copyFileSync, mkdirSync as mkdirSync4, readdirSync, unlinkSync as unlinkSync2 } from "fs";
+import path6 from "path";
+function processName(tier) {
+  const safe = (tier || "light").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return `pendrayg_memory_${safe}`;
+}
+
+// src/daemon.ts
+var HEALTH_PATH = "/health";
+var HEALTH_BODY = "memory-mcp";
+var PROBE_MS = 400;
+function daemonAlive(port) {
+  return new Promise((resolve) => {
+    const req = httpGet({ host: "127.0.0.1", port, path: HEALTH_PATH, timeout: PROBE_MS }, (res) => {
+      let body = "";
+      res.on("data", (c) => body += c);
+      res.on("end", () => resolve(body.trim() === HEALTH_BODY));
+    });
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+function nodeBinary(bootPath, tier) {
+  const exe = path7.join(path7.dirname(path7.dirname(bootPath)), "bin", `${processName(tier)}.exe`);
+  return process.platform === "win32" && existsSync3(exe) ? exe : process.execPath;
+}
+async function ensureDaemon(cfg, waitMs = 0) {
+  if (process.env.MEMORY_MCP_HTTP === "0") return;
+  if (await daemonAlive(cfg.mcpPort)) return;
+  const boot = fileURLToPath2(new URL("./boot.js", import.meta.url));
+  const child = spawn(nodeBinary(boot, cfg.embed.tier), ["--no-warnings", boot, "--http"], {
+    detached: true,
+    // survives this hook, and every session that spawned it
+    stdio: "ignore",
+    windowsHide: true
+  });
+  child.unref();
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    if (await daemonAlive(cfg.mcpPort)) return;
+    await new Promise((r) => setTimeout(r, 150));
+  }
 }
 
 // src/hook.ts
@@ -1410,6 +1475,8 @@ async function main() {
     }
     store = new MemoryStore(cfg.dbPath, cfg.embed.dim, cfg.embed.model, EMBED_TEXT_VERSION);
     await store.init();
+    if (mode === "sessionstart") await ensureDaemon(cfg, 8e3);
+    else if (mode === "prompt") await ensureDaemon(cfg);
     switch (mode) {
       case "sessionstart":
         output = handleSessionStart(cfg, store, payload);

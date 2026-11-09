@@ -1,7 +1,7 @@
 {
   "name": "memory",
-  "version": "0.13.3",
-  "description": "Persistent memory for Claude Code: raw capture via hooks (SessionStart/UserPromptSubmit/PostToolUse/Stop/SessionEnd), hybrid BM25 + semantic search (sqlite-vec + local transformers.js embeddings) via MCP. Embedded local SQLite storage — zero server, zero daemon, zero cloud.",
+  "version": "0.14.0",
+  "description": "Persistent memory for Claude Code: raw capture via hooks (SessionStart/UserPromptSubmit/PostToolUse/Stop/SessionEnd), hybrid BM25 + semantic search (sqlite-vec + local transformers.js embeddings) via MCP. Embedded local SQLite storage, served by a single loopback daemon shared by every session — zero cloud.",
   "author": {
     "name": "pendrayg"
   },
@@ -11,7 +11,7 @@
     "embedTier": {
       "type": "string",
       "title": "Semantic embedding tier",
-      "description": "light = e5-small (384 dim, ~120 MB, fast) · medium = e5-base (768 dim, ~280 MB, best FR trade-off) · heavy = e5-large (1024 dim, ~560 MB, max quality). Changeable later via /memory:config.",
+      "description": "light = e5-small (384 dim, ~120 MB, fast) · medium = e5-base (768 dim, ~280 MB, best FR trade-off) · heavy = e5-large (1024 dim, ~560 MB, max quality). Set it with /memory:config — the shared daemon reads ~/.claude-memory/config.json, not this field (an HTTP MCP server takes no env).",
       "required": false,
       "default": "light"
     }

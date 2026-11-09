@@ -18,6 +18,7 @@ var EMBED_TIERS = {
   }
 };
 var DEFAULT_TIER = "light";
+var DEFAULT_MCP_PORT = 47832;
 function resolveDevice(raw) {
   if (raw !== "auto") return raw;
   if (process.platform === "win32") return "dml";
@@ -99,6 +100,8 @@ function loadConfig() {
     6e4,
     src.num("MEMORY_PRODUCTION_IDLE_GAP_MS", "productionIdleGapMs", 3e5)
   );
+  const mcpPort = src.num("MEMORY_MCP_PORT", "mcpPort", DEFAULT_MCP_PORT);
+  const mcpIdleExitMs = Math.max(6e4, src.num("MEMORY_MCP_IDLE_EXIT_MS", "mcpIdleExitMs", 18e5));
   return {
     dbPath,
     dataDir,
@@ -109,7 +112,9 @@ function loadConfig() {
     autoRecall: { enabled: autoRecallEnabled, limit: autoRecallLimit },
     satisfactionWeight,
     loadPercent,
-    productionIdleGapMs
+    productionIdleGapMs,
+    mcpPort,
+    mcpIdleExitMs
   };
 }
 
@@ -1374,6 +1379,17 @@ function refreshLeadership(dataDir, extra) {
 
 // src/embed-service.ts
 import { createServer, request as httpRequest } from "http";
+
+// src/activity.ts
+var last = Date.now();
+function touch() {
+  last = Date.now();
+}
+function idleMs() {
+  return Date.now() - last;
+}
+
+// src/embed-service.ts
 var TOKEN_HEADER = "x-mem-token";
 function readBody(req) {
   return new Promise((resolve) => {
@@ -1395,6 +1411,7 @@ async function startLeaderService(handlers, token) {
       res.end();
       return;
     }
+    touch();
     try {
       const body = await readBody(req);
       let payload;
@@ -1421,7 +1438,7 @@ async function startLeaderService(handlers, token) {
   server.unref?.();
   return port;
 }
-function post(endpoint, path9, body, pick, timeoutMs = 8e3) {
+function post(endpoint, path10, body, pick, timeoutMs = 8e3) {
   return new Promise((resolve) => {
     const data = JSON.stringify(body);
     const req = httpRequest(
@@ -1429,7 +1446,7 @@ function post(endpoint, path9, body, pick, timeoutMs = 8e3) {
         host: "127.0.0.1",
         port: endpoint.port,
         method: "POST",
-        path: path9,
+        path: path10,
         headers: {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(data),
@@ -2006,7 +2023,7 @@ var DigestLoop = class {
 };
 
 // src/process-name.ts
-import { existsSync as existsSync4, copyFileSync, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync3, readdirSync, unlinkSync as unlinkSync2 } from "fs";
+import { existsSync as existsSync4, copyFileSync, mkdirSync as mkdirSync4, readdirSync, unlinkSync as unlinkSync2 } from "fs";
 import path7 from "path";
 function processName(tier) {
   const safe = (tier || "light").toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -2035,13 +2052,6 @@ function ensureNamedBinary(name) {
         }
       }
     } catch {
-    }
-    const mcpPath = path7.join(root, ".mcp.json");
-    const desired = "${CLAUDE_PLUGIN_ROOT}/bin/" + name + ".exe";
-    const mcp = JSON.parse(readFileSync5(mcpPath, "utf8"));
-    if (mcp?.mcpServers?.memory && mcp.mcpServers.memory.command !== desired) {
-      mcp.mcpServers.memory.command = desired;
-      writeFileSync3(mcpPath, JSON.stringify(mcp, null, 2) + "\n");
     }
   } catch {
   }
@@ -2540,7 +2550,8 @@ var allTools = [
 ];
 
 // src/memory-server.ts
-var PKG_VERSION = true ? "0.13.3" : "0.0.0-dev";
+var PKG_VERSION = true ? "0.14.0" : "0.0.0-dev";
+var IDLE_CHECK_MS = 6e4;
 var MemoryServer = class {
   constructor(config, store) {
     this.config = config;
@@ -2587,13 +2598,12 @@ var MemoryServer = class {
     if (!this.config.rerank.enabled || docs.length === 0) return Promise.resolve(null);
     return this.executor.rerankQuery(query, docs);
   }
-  async start() {
-    const name = processName(this.config.embed.tier);
-    try {
-      process.title = name;
-    } catch {
-    }
-    ensureNamedBinary(name);
+  /**
+   * Builds an MCP server bound to this instance's tools. One per connected client: the object is
+   * just a handler table — the weight (store, models) lives in the context it closes over, shared
+   * by every client. stdio builds exactly one; the HTTP daemon builds one per session.
+   */
+  buildMcpServer() {
     const ctx = {
       store: this.store,
       embedCfg: this.config.embed,
@@ -2604,7 +2614,7 @@ var MemoryServer = class {
     };
     const server = new Server({ name: "memory", version: PKG_VERSION }, { capabilities: { tools: {} } });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: allTools.map(({ name: name2, description, inputSchema }) => ({ name: name2, description, inputSchema }))
+      tools: allTools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
     }));
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const tool = allTools.find((t) => t.name === req.params.name);
@@ -2619,9 +2629,25 @@ var MemoryServer = class {
         return { content: [{ type: "text", text: `\u274C ${tool.name} failed: ${message}` }], isError: true };
       }
     });
-    await server.connect(new StdioServerTransport());
+    return server;
+  }
+  /**
+   * Boots the subsystem. `mode` only decides who talks to the MCP surface:
+   *  - `stdio`: this process serves its one parent session and dies with it (legacy shape).
+   *  - `http`: the caller already bound the endpoint (see {@link startMcpHttp}); this process is a
+   *    detached daemon serving every session, so it must NOT die with any one stdin, and needs the
+   *    idle watchdog below to ever go away.
+   */
+  async start(mode = "stdio") {
+    const name = processName(this.config.embed.tier);
+    try {
+      process.title = name;
+    } catch {
+    }
+    ensureNamedBinary(name);
+    if (mode === "stdio") await this.buildMcpServer().connect(new StdioServerTransport());
     process.stderr.write(
-      `memory v${PKG_VERSION} ready (stdio) \u2192 ${this.config.dbPath} | vectors: ${this.store.vectorEnabled ? "on" : "off"}
+      `memory v${PKG_VERSION} ready (${mode}) \u2192 ${this.config.dbPath} | vectors: ${this.store.vectorEnabled ? "on" : "off"}
 `
     );
     this.logStartupDiagnostics();
@@ -2638,8 +2664,31 @@ var MemoryServer = class {
     };
     process.on("SIGTERM", releaseAndExit);
     process.on("SIGINT", releaseAndExit);
-    process.stdin.on("end", releaseAndExit);
-    process.stdin.on("close", releaseAndExit);
+    if (mode === "stdio") {
+      process.stdin.on("end", releaseAndExit);
+      process.stdin.on("close", releaseAndExit);
+    } else {
+      this.watchIdle(releaseAndExit);
+    }
+  }
+  /**
+   * Daemon lifetime. stdio gave this for free (the server died with its session); a shared daemon
+   * has to decide for itself, or the heavy tier would sit on ~676 MB forever after the last window
+   * closed — the very cost this transport was meant to cut.
+   *
+   * Keyed off REQUEST TIME, not open MCP sessions: a client killed without a DELETE leaves its
+   * session in the transport map, so counting sessions would keep the daemon alive forever.
+   * Anything unfinished (vector backfill, digests) resumes on the next spawn — both loops are
+   * incremental and idempotent.
+   */
+  watchIdle(exit) {
+    const timer = setInterval(() => {
+      if (idleMs() < this.config.mcpIdleExitMs) return;
+      log(this.config.dataDir, `[server] idle ${Math.round(idleMs() / 6e4)} min \u2192 exit`);
+      clearInterval(timer);
+      exit();
+    }, IDLE_CHECK_MS);
+    timer.unref?.();
   }
   /** Just acquired leadership (startup or failover): swap to local, start the service + loops. */
   onBecameLeader() {
@@ -2690,13 +2739,102 @@ var MemoryServer = class {
   }
 };
 
+// src/mcp-http.ts
+import { createServer as createServer2 } from "http";
+import { randomUUID } from "crypto";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
+// src/daemon.ts
+import { get as httpGet } from "http";
+import { spawn as spawn2 } from "child_process";
+import { existsSync as existsSync6 } from "fs";
+import path9 from "path";
+import { fileURLToPath as fileURLToPath2 } from "url";
+var HEALTH_PATH = "/health";
+var HEALTH_BODY = "memory-mcp";
+
+// src/mcp-http.ts
+var MCP_PATH = "/mcp";
+var SESSION_HEADER = "mcp-session-id";
+async function startMcpHttp(options) {
+  const transports = /* @__PURE__ */ new Map();
+  const httpServer = createServer2((req, res) => {
+    const url = (req.url ?? "").split("?")[0];
+    if (url === HEALTH_PATH) {
+      res.writeHead(200, { "content-type": "text/plain" }).end(HEALTH_BODY);
+      return;
+    }
+    if (url !== MCP_PATH) {
+      res.writeHead(404).end();
+      return;
+    }
+    touch();
+    const sessionId = req.headers[SESSION_HEADER];
+    const known = typeof sessionId === "string" ? transports.get(sessionId) : void 0;
+    if (known) {
+      void known.handleRequest(req, res);
+      return;
+    }
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => {
+        transports.set(id, transport);
+        options.log(`[mcp-http] session ${id} opened (${transports.size} live)`);
+      }
+    });
+    transport.onclose = () => {
+      if (transport.sessionId && transports.delete(transport.sessionId)) {
+        options.log(`[mcp-http] session ${transport.sessionId} closed (${transports.size} live)`);
+      }
+    };
+    void options.createServer().then((server) => server.connect(transport)).then(() => transport.handleRequest(req, res)).catch((err) => {
+      options.log(`[mcp-http] connect failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (!res.headersSent) res.writeHead(500).end();
+    });
+  });
+  return new Promise((resolve) => {
+    httpServer.once("error", (err) => {
+      options.log(
+        err.code === "EADDRINUSE" ? `[mcp-http] port ${options.port} already served \u2014 nothing to do` : `[mcp-http] listen failed: ${err.message}`
+      );
+      resolve(false);
+    });
+    httpServer.listen(options.port, "127.0.0.1", () => {
+      options.log(`[mcp-http] listening on http://127.0.0.1:${options.port}${MCP_PATH}`);
+      resolve(true);
+    });
+  });
+}
+
 // src/server.ts
 console.log = (...args) => console.error("[stdout-redirected]", ...args);
+function buildStore(config) {
+  return new MemoryStore(config.dbPath, config.embed.dim, config.embed.model, EMBED_TEXT_VERSION);
+}
+async function runStdio(config) {
+  const store = buildStore(config);
+  await store.init();
+  await new MemoryServer(config, store).start("stdio");
+}
+async function runHttp(config) {
+  let publish;
+  const ready = new Promise((resolve) => publish = resolve);
+  const bound = await startMcpHttp({
+    port: config.mcpPort,
+    createServer: async () => (await ready).buildMcpServer(),
+    log: (m) => log(config.dataDir, m)
+  });
+  if (!bound) process.exit(0);
+  const store = buildStore(config);
+  await store.init();
+  const server = new MemoryServer(config, store);
+  publish(server);
+  await server.start("http");
+}
 async function main() {
   const config = loadConfig();
-  const store = new MemoryStore(config.dbPath, config.embed.dim, config.embed.model, EMBED_TEXT_VERSION);
-  await store.init();
-  await new MemoryServer(config, store).start();
+  const http = process.argv.includes("--http") || process.env.MEMORY_MCP_HTTP === "1";
+  await (http ? runHttp(config) : runStdio(config));
 }
 main().catch((err) => {
   process.stderr.write(`fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}

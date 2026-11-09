@@ -11,6 +11,9 @@ import {
   pidAlive,
   runHook,
   startServer,
+  startHttpDaemon,
+  connectHttp,
+  httpHealth,
   call,
   pollUntil,
   sleep,
@@ -366,6 +369,40 @@ test('2.5 doc ingestion: chunk, search, list, remove', { timeout: VECTO_TIMEOUT 
     assert.match(after, /No ingested doc/, 'doc gone after remove');
   } finally {
     await srv?.close();
+    cleanup(dataDir);
+  }
+});
+
+// 1.6 — Shared HTTP daemon: ONE process serves several sessions, and a second daemon on the same
+// port exits instead of competing. This is what removes the per-session server (plus its cmd.exe +
+// conhost.exe on Windows) — the whole reason the MCP surface moved off stdio.
+test('1.6 one HTTP daemon serves several sessions', { timeout: 60_000 }, async () => {
+  const dataDir = freshDataDir();
+  const env = baseEnv(dataDir, { MEMORY_EMBED_ENABLED: '0' }); // no model → fast; transport is the subject
+  const port = 47_900 + Math.floor(Math.random() * 90); // avoid a port left by a previous run
+  let daemon, a, b;
+  try {
+    daemon = await startHttpDaemon(env, port);
+
+    // Two independent clients, as two Claude sessions would be.
+    a = await connectHttp(port);
+    b = await connectHttp(port);
+    const [statsA, statsB] = await Promise.all([call(a, 'memory_stats'), call(b, 'memory_stats')]);
+    for (const s of [statsA, statsB]) assert.match(s, /memory — state/, 'both sessions get a working tool');
+
+    // Same process, so the same DB: a write through one session is visible from the other.
+    await call(a, 'memory_core_add', { text: 'daemon partagé entre sessions' });
+    assert.match(await call(b, 'memory_core_list', {}), /daemon partagé/, 'sessions share one store');
+
+    // The port IS the mutex: a second daemon must step aside, leaving the first untouched.
+    const loser = await startHttpDaemon(env, port, { wait: false });
+    const code = await new Promise((r) => loser.on('close', r));
+    assert.equal(code, 0, 'the duplicate daemon exits cleanly');
+    assert.ok(await httpHealth(port), 'the incumbent still serves');
+  } finally {
+    await a?.close();
+    await b?.close();
+    daemon?.kill();
     cleanup(dataDir);
   }
 });

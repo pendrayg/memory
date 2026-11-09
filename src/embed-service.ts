@@ -1,4 +1,5 @@
 import { createServer, request as httpRequest } from 'node:http';
+import { touch } from './activity.js';
 
 /**
  * Leader-only loopback service. The leader is the single process holding the models, so non-leader
@@ -37,6 +38,7 @@ export async function startLeaderService(handlers: LeaderHandlers, token: string
       res.end();
       return;
     }
+    touch(); // hook traffic counts as activity: it keeps the daemon's idle watchdog honest
     try {
       const body = await readBody(req);
       let payload: unknown;
