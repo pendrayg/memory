@@ -107,6 +107,7 @@ function loadConfig() {
   );
   const mcpPort = src.num("MEMORY_MCP_PORT", "mcpPort", DEFAULT_MCP_PORT);
   const mcpIdleExitMs = Math.max(6e4, src.num("MEMORY_MCP_IDLE_EXIT_MS", "mcpIdleExitMs", 18e5));
+  const mcpClientWatch = src.flag("MEMORY_MCP_CLIENT_WATCH", "mcpClientWatch");
   return {
     dbPath,
     dataDir,
@@ -119,7 +120,8 @@ function loadConfig() {
     loadPercent,
     productionIdleGapMs,
     mcpPort,
-    mcpIdleExitMs
+    mcpIdleExitMs,
+    mcpClientWatch
   };
 }
 

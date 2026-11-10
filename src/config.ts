@@ -44,6 +44,12 @@ export interface MemoryConfig {
    * long keeps the heavy tier resident long after the last window closed. Default 30 min.
    */
   mcpIdleExitMs: number;
+  /**
+   * Whether the daemon also exits once no Claude Code process is left on the machine (see
+   * {@link startClaudeWatch}). On by default; escape hatch for a machine where the process probe
+   * misreads (renamed binary, locked-down `tasklist`/`pgrep`) and would cut a live session short.
+   */
+  mcpClientWatch: boolean;
 }
 
 export interface AutoRecallConfig {
@@ -257,6 +263,7 @@ export function loadConfig(): MemoryConfig {
   // Floored at 1 min: a near-zero value would have the daemon exit between two prompts and reload
   // the model each time — strictly worse than the stdio shape it replaces.
   const mcpIdleExitMs = Math.max(60_000, src.num('MEMORY_MCP_IDLE_EXIT_MS', 'mcpIdleExitMs', 1_800_000));
+  const mcpClientWatch = src.flag('MEMORY_MCP_CLIENT_WATCH', 'mcpClientWatch');
 
   return {
     dbPath,
@@ -271,5 +278,6 @@ export function loadConfig(): MemoryConfig {
     productionIdleGapMs,
     mcpPort,
     mcpIdleExitMs,
+    mcpClientWatch,
   };
 }

@@ -102,6 +102,7 @@ function loadConfig() {
   );
   const mcpPort = src.num("MEMORY_MCP_PORT", "mcpPort", DEFAULT_MCP_PORT);
   const mcpIdleExitMs = Math.max(6e4, src.num("MEMORY_MCP_IDLE_EXIT_MS", "mcpIdleExitMs", 18e5));
+  const mcpClientWatch = src.flag("MEMORY_MCP_CLIENT_WATCH", "mcpClientWatch");
   return {
     dbPath,
     dataDir,
@@ -114,7 +115,8 @@ function loadConfig() {
     loadPercent,
     productionIdleGapMs,
     mcpPort,
-    mcpIdleExitMs
+    mcpIdleExitMs,
+    mcpClientWatch
   };
 }
 
@@ -2549,8 +2551,47 @@ var allTools = [
   ...timesheetTools
 ];
 
+// src/claude-watch.ts
+import { spawnSync } from "child_process";
+var WATCH_INTERVAL_MS = 3e5;
+var MISSES_BEFORE_EXIT = 2;
+function claudeIsRunning(exec = spawnSync) {
+  const windows = process.platform === "win32";
+  const probe = windows ? exec("tasklist", ["/FI", "IMAGENAME eq claude.exe", "/NH"], { encoding: "utf8", windowsHide: true }) : exec("pgrep", ["-f", "claude"], { encoding: "utf8" });
+  if (!probe || probe.error || typeof probe.stdout !== "string") return null;
+  if (windows) {
+    return probe.status === 0 ? /claude\.exe/i.test(probe.stdout) : null;
+  }
+  if (probe.status === 1) return false;
+  return probe.status === 0 ? probe.stdout.trim() !== "" : null;
+}
+function startClaudeWatch({
+  log: log2,
+  exit,
+  intervalMs = WATCH_INTERVAL_MS,
+  probe = claudeIsRunning
+}) {
+  let misses = 0;
+  const timer = setInterval(() => {
+    const alive = probe();
+    if (alive === null) {
+      misses = 0;
+      log2("[server] Claude Code probe unusable \u2014 daemon stays up");
+      return;
+    }
+    misses = alive ? 0 : misses + 1;
+    if (misses >= MISSES_BEFORE_EXIT) {
+      clearInterval(timer);
+      log2(`[server] no Claude Code for ${Math.round(MISSES_BEFORE_EXIT * intervalMs / 6e4)} min \u2192 exit`);
+      exit();
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
+}
+
 // src/memory-server.ts
-var PKG_VERSION = true ? "0.14.0" : "0.0.0-dev";
+var PKG_VERSION = true ? "0.15.0" : "0.0.0-dev";
 var IDLE_CHECK_MS = 6e4;
 var MemoryServer = class {
   constructor(config, store) {
@@ -2669,6 +2710,11 @@ var MemoryServer = class {
       process.stdin.on("close", releaseAndExit);
     } else {
       this.watchIdle(releaseAndExit);
+      if (this.config.mcpClientWatch) {
+        startClaudeWatch({ log: (m) => log(this.config.dataDir, m), exit: releaseAndExit });
+      } else {
+        log(this.config.dataDir, "[server] client watch disabled (MEMORY_MCP_CLIENT_WATCH=0)");
+      }
     }
   }
   /**

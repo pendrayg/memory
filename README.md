@@ -6,7 +6,7 @@
 
 A lightweight alternative to claude-mem: **embedded database, local embeddings, one shared loopback daemon, zero cloud.** The hooks never block Claude Code.
 
-[![version](https://img.shields.io/badge/version-0.14.0-8b5cf6?style=for-the-badge)](./.claude-plugin/plugin.json)
+[![version](https://img.shields.io/badge/version-0.15.0-8b5cf6?style=for-the-badge)](./.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-8b5cf6?style=for-the-badge&logo=anthropic&logoColor=white)](https://docs.claude.com/en/docs/claude-code)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A5_22.5-3c873a?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-6e7681?style=for-the-badge)](./LICENSE)
@@ -241,7 +241,7 @@ Sharing is safe because the MCP surface is session-agnostic: a tool's scope arri
 |---|---|
 | **Who starts it** | The `SessionStart` and `UserPromptSubmit` hooks (nothing else can — the MCP client only dials a URL). Checking on every prompt is what makes it self-healing. |
 | **Only one** | Binding the port *is* the mutex: two sessions racing both spawn a daemon, and the loser exits on `EADDRINUSE`. |
-| **When it stops** | After `mcpIdleExitMs` (default **30 min**) with no MCP call and no hook embedding. The next prompt brings it back; backfill and digests resume where they stopped. |
+| **When it stops** | Whichever comes first: `mcpIdleExitMs` (default **30 min**) with no MCP call and no hook embedding, or **no `claude` process left on the machine** for two consecutive 5-min probes (`MEMORY_MCP_CLIENT_WATCH=0` to disable). The next prompt brings it back; backfill and digests resume where they stopped. |
 | **If the port is taken** | By something else on your machine: set `mcpPort` (or `MEMORY_MCP_PORT`) **and** the URL in `.mcp.json`. The `/health` probe answers `memory-mcp`, so a squatter is never mistaken for the daemon. |
 | **Back to stdio** | `MEMORY_MCP_HTTP=0` stops the hooks spawning a daemon; point `.mcp.json` back at `"type": "stdio"` + `dist/boot.js`. |
 
@@ -257,7 +257,7 @@ sequenceDiagram
     participant L as Daemon / leader (has model)
     L->>K: heartbeat — renew pid+ts (~30s)
     H-->>L: query→vector over loopback (during recall)
-    Note over L: 30 min idle, or SIGTERM
+    Note over L: 30 min idle, no Claude Code left, or SIGTERM
     L->>K: release lock
     Note over H: next prompt → hook respawns the daemon
     H->>L: spawn (detached) + /health
@@ -303,7 +303,7 @@ Vectorization runs on **CPU by default**. To use the GPU, set `MEMORY_EMBED_DEVI
 <summary><h2>🎛️ Configuration</h2></summary>
 
 Two mechanisms, **env takes precedence over the file**:
-- File `~/.claude-memory/config.json`, e.g. `{ "embedTier": "medium" }` (keys: `embedTier`, `embedEnabled`, `embedDevice`, `digestEnabled`, `digestModel`, `rerankEnabled`, `rerankModel`, `autoRecall`, `autoRecallLimit`, `satisfactionWeight`, `loadPercent`, `dbPath`, `embedModel`, `embedDim`, `contextLimit`, `mcpPort`, `mcpIdleExitMs`). Editable via `/memory:config`.
+- File `~/.claude-memory/config.json`, e.g. `{ "embedTier": "medium" }` (keys: `embedTier`, `embedEnabled`, `embedDevice`, `digestEnabled`, `digestModel`, `rerankEnabled`, `rerankModel`, `autoRecall`, `autoRecallLimit`, `satisfactionWeight`, `loadPercent`, `dbPath`, `embedModel`, `embedDim`, `contextLimit`, `mcpPort`, `mcpIdleExitMs`, `mcpClientWatch`). Editable via `/memory:config`.
 - System environment variables (overrides):
 
 | Variable | Default | Role |
@@ -314,6 +314,7 @@ Two mechanisms, **env takes precedence over the file**:
 | `MEMORY_CONTEXT_LIMIT` | `10` | Memories injected at `SessionStart` |
 | `MEMORY_MCP_PORT` | `47832` | Loopback port of the shared daemon (must match the URL in `.mcp.json`) |
 | `MEMORY_MCP_IDLE_EXIT_MS` | `1800000` | Idle time before the daemon exits (min 1 min) |
+| `MEMORY_MCP_CLIENT_WATCH` | _(enabled)_ | `0` → the daemon no longer exits when no `claude` process is left on the machine |
 | `MEMORY_MCP_HTTP` | _(enabled)_ | `0` → hooks never spawn the daemon (per-session stdio servers instead) |
 | `MEMORY_EMBED_ENABLED` | _(enabled)_ | `0` to disable semantic search (BM25 only) |
 | `MEMORY_DIGEST_ENABLED` | _(enabled)_ | `0` to disable LLM session digests (`claude -p`) |

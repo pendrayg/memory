@@ -18,6 +18,7 @@ import { allTools } from './tools/index.js';
 import type { ToolContext } from './tools/types.js';
 import { log, writeStatus } from './log.js';
 import { idleMs } from './activity.js';
+import { startClaudeWatch } from './claude-watch.js';
 
 declare const __PKG_VERSION__: string;
 const PKG_VERSION = typeof __PKG_VERSION__ !== 'undefined' ? __PKG_VERSION__ : '0.0.0-dev';
@@ -169,7 +170,13 @@ export class MemoryServer {
       process.stdin.on('end', releaseAndExit);
       process.stdin.on('close', releaseAndExit);
     } else {
+      // Two complementary watchdogs: one on traffic, one on whether a client could even exist.
       this.watchIdle(releaseAndExit);
+      if (this.config.mcpClientWatch) {
+        startClaudeWatch({ log: (m) => log(this.config.dataDir, m), exit: releaseAndExit });
+      } else {
+        log(this.config.dataDir, '[server] client watch disabled (MEMORY_MCP_CLIENT_WATCH=0)');
+      }
     }
   }
 
